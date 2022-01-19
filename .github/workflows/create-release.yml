@@ -1,27 +1,53 @@
 name: Create release assets
 
 on:
-  push:
+  pull_request:
     branches: [ master ]
 
 jobs:
+  set-atlantis-versions:
+    name: Set Atlantis versions
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          INFRACOST_VERSION=0.9
+          VERSIONS=$(curl -s https://api.github.com/repos/runatlantis/atlantis/releases\?per_page\=100 | jq -r --arg INFRACOST_VERSION "$INFRACOST_VERSION" '[.[].tag_name]  | map(capture("^v(?<major>0|[1-9]\\d*)\\.(?<minor>0|[1-9]\\d*)\\.(?<patch>0|[1-9]\\d*)")) | map({version: "v\(.major).\(.minor).\(.patch)", group: "\(.major).\(.minor)", major: .major | tonumber, minor: .minor | tonumber, patch:  .patch | tonumber}) | group_by(.group) | map (.[0]) | sort_by(.major, .minor, .patch) | reverse | .[:3] | . as $result | map(if .version == $result[0].version then {version, tags: "atlantis\(.group)-infracost\($INFRACOST_VERSION), latest"} else {version, tags: "atlantis\(.group)-infracost\($INFRACOST_VERSION)"} end) | {include: .} | tostring')
+          echo "::set-output name=matrix::${VERSIONS}"
   build:
     name: Create release assets
+    needs: set-atlantis-versions
     runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{fromJson(needs.set-atlantis-versions.outputs.matrix)}}
     steps:
-      - name: Checkout code
+      - name: Checkout Dockerfile
         uses: actions/checkout@v2
 
-      - name: Set Atlantis docker tag
-        run: |
-          echo "ATLANTIS_TAG=latest-atlantis$(cat Dockerfile | \
-            grep -oE 'FROM.*atlantis.*' | \
-            grep -oE '[0-9]+.[0-9]+.[0-9]+')" >> $GITHUB_ENV
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
 
-      - name: Build and push Docker images
-        uses: docker/build-push-action@v1
+      # - name: Login to DockerHub
+      #   uses: docker/login-action@v1
+      #   with:
+      #     username: ${{ secrets.DOCKER_USERNAME }}
+      #     password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v2
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          context: .
           repository: ${{ secrets.DOCKER_ORG }}/${{ secrets.DOCKER_REPOSITORY }}
-          tags: ${{ env.ATLANTIS_TAG }},latest
+          tags: ${{ matrix.tags }}
+          labels: |
+            atlantis-version=${{ matrix.version }}
+            cli-version=0.9.17
+          build-args: |
+            version=${{ matrix.version }}
+          push: false
+          load: true
+      - name: Inspect
+        run: |
+          docker image inspect ${{ secrets.DOCKER_ORG }}/${{ secrets.DOCKER_REPOSITORY }}:latest
