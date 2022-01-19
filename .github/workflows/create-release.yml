@@ -1,11 +1,12 @@
-name: Create release assets
+name: Create Atlantis release
 
 on:
-  pull_request:
-    branches: [ master ]
+  push:
+    tags:
+      - "v*"
 
 jobs:
-  set-atlantis-versions:
+  get-atlantis-versions:
     name: Set Atlantis versions
     runs-on: ubuntu-latest
     outputs:
@@ -13,41 +14,46 @@ jobs:
     steps:
       - id: set-matrix
         run: |
-          INFRACOST_VERSION=0.9
-          VERSIONS=$(curl -s https://api.github.com/repos/runatlantis/atlantis/releases\?per_page\=100 | jq -r --arg INFRACOST_VERSION "$INFRACOST_VERSION" '[.[].tag_name]  | map(capture("^v(?<major>0|[1-9]\\d*)\\.(?<minor>0|[1-9]\\d*)\\.(?<patch>0|[1-9]\\d*)")) | map({version: "v\(.major).\(.minor).\(.patch)", group: "\(.major).\(.minor)", major: .major | tonumber, minor: .minor | tonumber, patch:  .patch | tonumber}) | group_by(.group) | map (.[0]) | sort_by(.major, .minor, .patch) | reverse | .[:3] | . as $result | map(if .version == $result[0].version then {version, tags: "atlantis\(.group)-infracost\($INFRACOST_VERSION), latest"} else {version, tags: "atlantis\(.group)-infracost\($INFRACOST_VERSION)"} end) | {include: .} | tostring')
+          VERSIONS=$(curl -s https://api.github.com/repos/runatlantis/atlantis/releases\?per_page\=100 | jq -r '[.[].tag_name]  | map(capture("^v(?<major>0|[1-9]\\d*)\\.(?<minor>0|[1-9]\\d*)\\.(?<patch>0|[1-9]\\d*)")) | map({version: "\(.major).\(.minor).\(.patch)", group: "\(.major).\(.minor)", major: .major | tonumber, minor: .minor | tonumber, patch:  .patch | tonumber}) | group_by(.group) | map (.[0]) | sort_by(.major, .minor, .patch) | reverse | .[:2] | . as $result | map({version, group, latest: (.version == $result[0].version)}) | {include: .} | tostring')
           echo "::set-output name=matrix::${VERSIONS}"
   build:
     name: Create release assets
-    needs: set-atlantis-versions
+    needs: get-atlantis-versions
     runs-on: ubuntu-latest
     strategy:
-      matrix: ${{fromJson(needs.set-atlantis-versions.outputs.matrix)}}
+      matrix: ${{fromJson(needs.get-atlantis-versions.outputs.matrix)}}
     steps:
-      - name: Checkout Dockerfile
+      - name: Checkout code
         uses: actions/checkout@v2
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v1
 
-      # - name: Login to DockerHub
-      #   uses: docker/login-action@v1
-      #   with:
-      #     username: ${{ secrets.DOCKER_USERNAME }}
-      #     password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Login to DockerHub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v3
+        with:
+          images: infracost/atlantis-test
+          flavor: |
+            latest=${{ matrix.latest }}
+            prefix=atlantis${{ matrix.group }}-infracost,onlatest=false
+          tags: |
+            type=semver,pattern={{major}}.{{minor}}
+          labels: |
+            atlantis-version=${{ matrix.version }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v2
         with:
           context: .
-          repository: ${{ secrets.DOCKER_ORG }}/${{ secrets.DOCKER_REPOSITORY }}
-          tags: ${{ matrix.tags }}
-          labels: |
-            atlantis-version=${{ matrix.version }}
-            cli-version=0.9.17
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            version=${{ matrix.version }}
-          push: false
-          load: true
-      - name: Inspect
-        run: |
-          docker image inspect ${{ secrets.DOCKER_ORG }}/${{ secrets.DOCKER_REPOSITORY }}:latest
+            version=v${{ matrix.version }}
+          push: true
